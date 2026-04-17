@@ -33,6 +33,16 @@
       <div class="breadcrumb" id="breadcrumb"></div>
       <div class="tree" id="tree"></div>
     </div>
+    <div class="card" id="diagCard">
+      <h2>Diagnostics</h2>
+      <p class="diag-text">Use this to verify that the MCP client sees all tools exposed by this server over SSE.</p>
+      <div class="diag-row">
+        <span class="info-label">SSE Endpoint</span>
+        <div class="endpoint" id="sseEndpointDiag"></div>
+      </div>
+      <button class="apply-btn" id="probeToolsBtn">Probe tools via SSE</button>
+      <pre class="diag-output" id="probeToolsOutput"></pre>
+    </div>
   </div>
   <script src="/static/js/app.js"></script>
 </body>

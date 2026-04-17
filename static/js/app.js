@@ -11,12 +11,69 @@ const applyStatus = document.getElementById('applyStatus');
 const treeEl      = document.getElementById('tree');
 const breadcrumb  = document.getElementById('breadcrumb');
 const sseEndpoint = document.getElementById('sseEndpoint');
+const sseEndpointDiag   = document.getElementById('sseEndpointDiag');
+const probeToolsBtn     = document.getElementById('probeToolsBtn');
+const probeToolsOutput  = document.getElementById('probeToolsOutput');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-sseEndpoint.textContent = window.location.origin + '/sse';
+const sseUrl = window.location.origin + '/sse';
+if (sseEndpoint)      sseEndpoint.textContent = sseUrl;
+if (sseEndpointDiag)  sseEndpointDiag.textContent = sseUrl;
+if (probeToolsBtn && probeToolsOutput) {
+  probeToolsBtn.addEventListener('click', probeTools);
+}
 applyBtn.addEventListener('click', applyRoots);
 loadRoots();
 browse('/');
+
+async function probeTools() {
+  probeToolsOutput.textContent = 'Probing…';
+
+  const base = window.location.origin;
+  const sseUrlLocal = base + '/sse';
+  const msgUrl = base + '/message';
+
+  const id = 'probe-' + Date.now();
+
+  const es = new EventSource(sseUrlLocal);
+  es.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.id === id && msg.result && msg.result.tools) {
+        const names = msg.result.tools.map(t => t.name).sort();
+        probeToolsOutput.textContent = 'Tools (via SSE):\n' + names.join('\n');
+        es.close();
+      }
+    } catch (e) {
+      // ignore non-JSON events
+    }
+  };
+  es.onerror = (err) => {
+    probeToolsOutput.textContent = 'SSE error while probing tools';
+    es.close();
+  };
+
+  try {
+    const payload = [{
+      jsonrpc: '2.0',
+      id,
+      method: 'list_tools',
+      params: {}
+    }];
+    const res = await fetch(msgUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      probeToolsOutput.textContent = 'POST /message failed: ' + res.status + ' ' + res.statusText;
+      es.close();
+    }
+  } catch (e) {
+    probeToolsOutput.textContent = 'Request error: ' + e.message;
+    es.close();
+  }
+}
 
 // ── Roots ─────────────────────────────────────────────────────────────────────
 async function loadRoots() {

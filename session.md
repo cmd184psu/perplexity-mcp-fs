@@ -107,3 +107,21 @@ These are silently skipped in `list_directory` and `search_files` to prevent con
 2. Ask Perplexity to read `session.md` first
 3. Check `main.go`, `main_test.go`, `Makefile`, and `static/` for current state
 4. Run `make check` to see test status before making changes
+
+---
+
+### 2026-04-16 23:21 EDT
+
+**Summary**
+- Embedded the GUI assets with `//go:embed static`, so the binary is now self-contained.
+- Fixed the nil logger panic in tests by giving `logger` a default discard logger before `main()` runs.
+- Added three new MCP tools in `main.go`: `make_test`, `make_build`, and `update_session_md`.
+- Confirmed `make test` and `make check` pass after wiring in the new tools.
+- Verified dynamic roots are working by listing `/opt/fs-tools` through the connector after adding it as a root.
+- Added a Diagnostics panel to the GUI to probe tool exposure; browser-side `/message` probing currently returns HTTP 400 and does not yet prove tool discovery.
+
+**Next steps**
+- Check the connector dialog to confirm how many tools the client is actually seeing.
+- If needed, add a simpler `/api/tools` smoke-test endpoint in the server that returns the registered tool list directly from Go.
+- Update the older parts of this file so the project overview and known-issues section reflect the current embedded-static and new-tool state.
+- Consider adding `httptest` coverage for API handlers and any future diagnostics endpoint.

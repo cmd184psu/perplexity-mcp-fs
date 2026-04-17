@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -11,9 +12,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -120,6 +123,104 @@ func setRoots(roots []string) error {
 	rootsMu.Unlock()
 	logger.Printf("roots updated: %v", validated)
 	return nil
+}
+
+func resolveProjectRoot(projectRoot string) (string, error) {
+	abs, err := resolvePath(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("project root stat error: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("project root %q is not a directory", abs)
+	}
+	if _, err := os.Stat(filepath.Join(abs, "session.md")); err != nil {
+		return "", fmt.Errorf("project root %q must contain session.md", abs)
+	}
+	return abs, nil
+}
+
+func runMakeTarget(projectRoot, target string) (string, error) {
+	root, err := resolveProjectRoot(projectRoot)
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "make", target)
+	cmd.Dir = root
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	err = cmd.Run()
+	duration := time.Since(start)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("cwd: %s\n", root))
+	sb.WriteString(fmt.Sprintf("command: make %s\n", target))
+	sb.WriteString(fmt.Sprintf("duration: %s\n", duration.Round(time.Millisecond)))
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("exit: error (%v)\n", err))
+	} else {
+		sb.WriteString("exit: 0\n")
+	}
+	if stdout.Len() > 0 {
+		sb.WriteString("\nstdout:\n")
+		sb.WriteString(stdout.String())
+	}
+	if stderr.Len() > 0 {
+		sb.WriteString("\nstderr:\n")
+		sb.WriteString(stderr.String())
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return sb.String(), fmt.Errorf("command timed out")
+	}
+	if err != nil {
+		return sb.String(), fmt.Errorf("make %s failed", target)
+	}
+	return sb.String(), nil
+}
+
+func appendSessionNote(projectRoot, summary, nextSteps string) (string, error) {
+	root, err := resolveProjectRoot(projectRoot)
+	if err != nil {
+		return "", err
+	}
+
+	sessionPath := filepath.Join(root, "session.md")
+	f, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return "", fmt.Errorf("open session.md: %w", err)
+	}
+	defer f.Close()
+
+	var sb strings.Builder
+	sb.WriteString("\n\n### ")
+	sb.WriteString(time.Now().Format("2006-01-02 15:04 MST"))
+	sb.WriteString("\n\n")
+	sb.WriteString("**Summary**\n")
+	sb.WriteString(summary)
+	sb.WriteString("\n")
+	if strings.TrimSpace(nextSteps) != "" {
+		sb.WriteString("\n**Next steps**\n")
+		sb.WriteString(nextSteps)
+		sb.WriteString("\n")
+	}
+
+	if _, err := f.WriteString(sb.String()); err != nil {
+		return "", fmt.Errorf("write session.md: %w", err)
+	}
+	return fmt.Sprintf("updated %s", sessionPath), nil
 }
 
 // ── MCP tools ───────────────────────────────────────────────────────────────────
@@ -328,6 +429,57 @@ func buildMCPServer() *server.MCPServer {
 				"path: %s\ntype: %s\nsize: %d bytes\nmod_time: %s\npermissions: %s\n",
 				abs, kind, info.Size(), info.ModTime().Format("2006-01-02 15:04:05"), info.Mode().String(),
 			)), nil
+		},
+	)
+
+	s.AddTool(
+		mcp.NewTool("update_session_md",
+			mcp.WithDescription("Append a timestamped note to session.md at the top of the specified project root"),
+			mcp.WithString("project_root", mcp.Required(), mcp.Description("Project root directory; must be an allowed root and contain session.md")),
+			mcp.WithString("summary", mcp.Required(), mcp.Description("Short summary of what changed or was learned")),
+			mcp.WithString("next_steps", mcp.Description("Optional next steps for the project")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			msg, err := appendSessionNote(
+				req.GetString("project_root", ""),
+				req.GetString("summary", ""),
+				req.GetString("next_steps", ""),
+			)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			logger.Printf("update_session_md: %s", req.GetString("project_root", ""))
+			return mcp.NewToolResultText(msg), nil
+		},
+	)
+
+	s.AddTool(
+		mcp.NewTool("make_test",
+			mcp.WithDescription("Run 'make test' from the top of the specified project root. The root must contain session.md."),
+			mcp.WithString("project_root", mcp.Required(), mcp.Description("Project root directory; must be an allowed root and contain session.md")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			out, err := runMakeTarget(req.GetString("project_root", ""), "test")
+			if err != nil {
+				return mcp.NewToolResultError(out), nil
+			}
+			logger.Printf("make_test: %s", req.GetString("project_root", ""))
+			return mcp.NewToolResultText(out), nil
+		},
+	)
+
+	s.AddTool(
+		mcp.NewTool("make_build",
+			mcp.WithDescription("Run 'make build' from the top of the specified project root. The root must contain session.md."),
+			mcp.WithString("project_root", mcp.Required(), mcp.Description("Project root directory; must be an allowed root and contain session.md")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			out, err := runMakeTarget(req.GetString("project_root", ""), "build")
+			if err != nil {
+				return mcp.NewToolResultError(out), nil
+			}
+			logger.Printf("make_build: %s", req.GetString("project_root", ""))
+			return mcp.NewToolResultText(out), nil
 		},
 	)
 
