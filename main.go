@@ -2,21 +2,65 @@ package main
 
 import (
 	"context"
-	"errors"
+	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-var allowedRoots []string
+//go:embed static
+var staticFiles embed.FS
 
+// ── Config ─────────────────────────────────────────────────────────────────────
+
+type Config struct {
+	Port  int      `json:"port"`
+	Roots []string `json:"roots"`
+}
+
+func configPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".mcp-fs-sse.json")
+}
+
+func loadConfig() Config {
+	cfg := Config{Port: 8765}
+	data, err := os.ReadFile(configPath())
+	if err != nil {
+		return cfg
+	}
+	_ = json.Unmarshal(data, &cfg)
+	return cfg
+}
+
+func saveConfig(cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath(), data, 0644)
+}
+
+// ── Globals ───────────────────────────────────────────────────────────────────
+
+var (
+	allowedRoots []string
+	rootsMu      sync.RWMutex
+	logger       = log.New(io.Discard, "", 0)
+)
+
+// SkipDirs are directory names ignored by list_directory and search_files.
 var skipDirs = map[string]bool{
 	".git":          true,
 	".svn":          true,
@@ -38,11 +82,15 @@ var skipDirs = map[string]bool{
 	".DS_Store":     true,
 }
 
+// ── Path resolution ──────────────────────────────────────────────────────────────
+
 func resolvePath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}
+	rootsMu.RLock()
+	defer rootsMu.RUnlock()
 	for _, root := range allowedRoots {
 		if strings.HasPrefix(abs, root+string(filepath.Separator)) || abs == root {
 			return abs, nil
@@ -51,8 +99,33 @@ func resolvePath(p string) (string, error) {
 	return "", fmt.Errorf("path %q is outside allowed roots", abs)
 }
 
-func buildServer(logger *log.Logger) *server.MCPServer {
-	s := server.NewMCPServer("mcp-fs", "1.1.0", server.WithToolCapabilities(false))
+func setRoots(roots []string) error {
+	var validated []string
+	for _, r := range roots {
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			return fmt.Errorf("invalid root %q: %w", r, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return fmt.Errorf("root %q does not exist: %w", abs, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("root %q is not a directory", abs)
+		}
+		validated = append(validated, abs)
+	}
+	rootsMu.Lock()
+	allowedRoots = validated
+	rootsMu.Unlock()
+	logger.Printf("roots updated: %v", validated)
+	return nil
+}
+
+// ── MCP tools ───────────────────────────────────────────────────────────────────
+
+func buildMCPServer() *server.MCPServer {
+	s := server.NewMCPServer("mcp-fs", "1.3.0", server.WithToolCapabilities(false))
 
 	s.AddTool(
 		mcp.NewTool("read_file",
@@ -60,8 +133,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute or relative path to the file")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -81,12 +153,11 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("content", mcp.Required(), mcp.Description("Text content to write")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			content := req.GetString("content", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+			content := req.GetString("content", "")
 			if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("mkdir error: %v", err)), nil
 			}
@@ -106,10 +177,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("new_str", mcp.Required(), mcp.Description("Replacement string")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			oldStr := req.GetString("old_str", "")
-			newStr := req.GetString("new_str", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -118,10 +186,11 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 				return mcp.NewToolResultError(fmt.Sprintf("read error: %v", err)), nil
 			}
 			src := string(data)
+			oldStr := req.GetString("old_str", "")
 			if !strings.Contains(src, oldStr) {
 				return mcp.NewToolResultError("old_str not found in file"), nil
 			}
-			updated := strings.Replace(src, oldStr, newStr, 1)
+			updated := strings.Replace(src, oldStr, req.GetString("new_str", ""), 1)
 			if err := os.WriteFile(abs, []byte(updated), 0644); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("write error: %v", err)), nil
 			}
@@ -136,8 +205,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Directory path to list")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -170,12 +238,11 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("pattern", mcp.Required(), mcp.Description("Glob pattern, e.g. '*.go' or 'main*'")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			pattern := req.GetString("pattern", "*")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+			pattern := req.GetString("pattern", "*")
 			var matches []string
 			_ = filepath.WalkDir(abs, func(p string, d os.DirEntry, err error) error {
 				if err != nil {
@@ -185,8 +252,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 					return filepath.SkipDir
 				}
 				if !d.IsDir() {
-					ok, _ := filepath.Match(pattern, d.Name())
-					if ok {
+					if ok, _ := filepath.Match(pattern, d.Name()); ok {
 						matches = append(matches, p)
 					}
 				}
@@ -203,8 +269,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Directory path to create")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -222,8 +287,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Path to the file to delete")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -248,8 +312,7 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Path to inspect")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			raw := req.GetString("path", "")
-			abs, err := resolvePath(raw)
+			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -261,77 +324,180 @@ func buildServer(logger *log.Logger) *server.MCPServer {
 			if info.IsDir() {
 				kind = "directory"
 			}
-			result := fmt.Sprintf(
+			return mcp.NewToolResultText(fmt.Sprintf(
 				"path: %s\ntype: %s\nsize: %d bytes\nmod_time: %s\npermissions: %s\n",
 				abs, kind, info.Size(), info.ModTime().Format("2006-01-02 15:04:05"), info.Mode().String(),
-			)
-			return mcp.NewToolResultText(result), nil
+			)), nil
 		},
 	)
 
 	return s
 }
 
-func main() {
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcp-fs [-log <file>] [-sse] [-port <n>] <root1> [root2 ...]\n\nFlags:\n")
-		flag.PrintDefaults()
+// ── API handlers ──────────────────────────────────────────────────────────────────
+
+type browseEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+func handleBrowse(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = "/"
 	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var result []browseEntry
+	for _, e := range entries {
+		if skipDirs[e.Name()] {
+			continue
+		}
+		if e.IsDir() {
+			result = append(result, browseEntry{
+				Name:  e.Name(),
+				Path:  filepath.Join(path, e.Name()),
+				IsDir: true,
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func handleGetRoots(w http.ResponseWriter, r *http.Request) {
+	rootsMu.RLock()
+	roots := append([]string{}, allowedRoots...)
+	rootsMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(roots)
+}
+
+func handleSetRoots(w http.ResponseWriter, r *http.Request) {
+	var roots []string
+	if err := json.NewDecoder(r.Body).Decode(&roots); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := setRoots(roots); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cfg := loadConfig()
+	cfg.Roots = roots
+	if err := saveConfig(cfg); err != nil {
+		http.Error(w, "saved roots but failed to write config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "roots": roots})
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────────
+
+func main() {
 	logPath := flag.String("log", "", "path to log file (default: stderr)")
 	sseMode := flag.Bool("sse", false, "serve over HTTP/SSE instead of stdio")
-	port    := flag.Int("port", 8765, "port to listen on in SSE mode")
+	port    := flag.Int("port", 0, "port for SSE mode (overrides config, default 8765)")
 	flag.Parse()
 
-	roots := flag.Args()
-	if len(roots) == 0 {
-		flag.Usage()
-		os.Exit(1)
-	}
-
+	// Logger
 	var logOut io.Writer = os.Stderr
 	if *logPath != "" {
 		f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "mcp-fs: cannot open log file: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cannot open log file: %v\n", err)
 			os.Exit(1)
 		}
 		defer f.Close()
 		logOut = f
 	}
-	logger := log.New(logOut, "[mcp-fs] ", log.LstdFlags)
+	logger = log.New(logOut, "", log.LstdFlags)
 
-	for _, r := range roots {
-		abs, err := filepath.Abs(r)
-		if err != nil {
-			logger.Fatalf("invalid root %q: %v", r, err)
-		}
-		info, err := os.Stat(abs)
-		if err != nil {
-			logger.Fatalf("root %q does not exist: %v", abs, err)
-		}
-		if !info.IsDir() {
-			logger.Fatalf("root %q is not a directory", abs)
-		}
-		allowedRoots = append(allowedRoots, abs)
-		logger.Printf("allowed root: %s", abs)
+	// Load config
+	cfg := loadConfig()
+	if *port != 0 {
+		cfg.Port = *port
 	}
 
-	s := buildServer(logger)
+	// Roots: CLI args override config
+	initialRoots := cfg.Roots
+	if flag.NArg() > 0 {
+		initialRoots = flag.Args()
+	}
+	if len(initialRoots) > 0 {
+		if err := setRoots(initialRoots); err != nil {
+			logger.Fatalf("invalid root: %v", err)
+		}
+	}
 
-	if *sseMode {
-		addr := fmt.Sprintf(":%d", *port)
-		baseURL := fmt.Sprintf("http://localhost:%d", *port)
-		logger.Printf("mcp-fs ready in SSE mode on %s", baseURL)
-		sse := server.NewSSEServer(s, server.WithBaseURL(baseURL))
-		if err := sse.Start(addr); err != nil {
-			logger.Fatalf("SSE server error: %v", err)
+	mcpSrv := buildMCPServer()
+
+	if !*sseMode {
+		// Stdio mode
+		stdioSrv := server.NewStdioServer(mcpSrv)
+		if err := stdioSrv.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
+			logger.Fatalf("stdio server error: %v", err)
 		}
-	} else {
-		logger.Printf("mcp-fs ready, serving %d root(s) via stdio", len(allowedRoots))
-		if err := server.ServeStdio(s); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Fatalf("server error: %v", err)
+		return
+	}
+
+	// SSE mode — static files are embedded in the binary via //go:embed
+	staticFS, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		logger.Fatalf("embed sub error: %v", err)
+	}
+	logger.Printf("serving embedded static files")
+
+	mux := http.NewServeMux()
+
+	// MCP SSE endpoint
+	sseSrv := server.NewSSEServer(mcpSrv, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Port)))
+	mux.Handle("/sse", sseSrv)
+	mux.Handle("/message", sseSrv)
+
+	// API
+	mux.HandleFunc("/api/browse", handleBrowse)
+	mux.HandleFunc("/api/roots", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleGetRoots(w, r)
+		case http.MethodPost:
+			handleSetRoots(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-		logger.Printf("session complete")
+	})
+
+	// Static UI — served from embedded FS
+	fileServer := http.FileServer(http.FS(staticFS))
+	mux.Handle("/static/", http.StripPrefix("/static/", fileServer))
+
+	// Root → index.html
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			f, err := staticFS.Open("index.html")
+			if err != nil {
+				http.Error(w, "index.html not found", http.StatusInternalServerError)
+				return
+			}
+			f.Close()
+			http.ServeFileFS(w, r, staticFS, "index.html")
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	logger.Printf("mcp-fs SSE listening on http://localhost%s", addr)
+	logger.Printf("  GUI:          http://localhost%s/", addr)
+	logger.Printf("  SSE endpoint: http://localhost%s/sse", addr)
+
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		logger.Fatalf("http server error: %v", err)
 	}
 }
-

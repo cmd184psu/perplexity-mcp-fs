@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mcp-fs</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header>
+    <h1>mcp-fs</h1>
+    <span class="badge" id="statusBadge">running</span>
+  </header>
+  <div class="container">
+    <div class="card" id="rootsCard">
+      <h2>Active Roots</h2>
+      <ul class="root-list" id="rootList"></ul>
+      <button class="apply-btn" id="applyBtn">Apply Changes</button>
+      <div class="status" id="applyStatus"></div>
+      <div class="info-section">
+        <div class="info-row">
+          <span class="info-label">SSE Endpoint</span>
+          <div class="endpoint" id="sseEndpoint"></div>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Config File</span>
+          <div class="endpoint">~/.mcp-fs-sse.json</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="browseCard">
+      <h2>Browse &amp; Add Directories</h2>
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <div class="tree" id="tree"></div>
+    </div>
+  </div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

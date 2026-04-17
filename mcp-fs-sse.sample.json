@@ -1,0 +1,7 @@
+{
+  "port": 8765,
+  "roots": [
+    "/opt/project1",
+    "/opt/project2"
+  ]
+}

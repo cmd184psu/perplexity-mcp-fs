@@ -1,0 +1,254 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f5f5f7;
+  color: #1d1d1f;
+  min-height: 100vh;
+}
+
+header {
+  background: #1d1d1f;
+  color: #f5f5f7;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.badge {
+  background: #30d158;
+  color: #000;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 99px;
+}
+
+.container {
+  max-width: 900px;
+  margin: 32px auto;
+  padding: 0 24px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.card h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #6e6e73;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 14px;
+}
+
+/* Roots list */
+.root-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.root-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f5f5f7;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: "SF Mono", ui-monospace, monospace;
+}
+
+.root-item span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.root-item .remove-btn {
+  border: none;
+  background: none;
+  color: #ff3b30;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.root-item .remove-btn:hover { color: #c0392b; }
+
+.root-empty {
+  color: #aeaeb2;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+/* Apply button */
+.apply-btn {
+  margin-top: 14px;
+  width: 100%;
+  padding: 10px;
+  background: #0071e3;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.apply-btn:hover { background: #0077ed; }
+.apply-btn:active { background: #005bbf; }
+.apply-btn:disabled { background: #aeaeb2; cursor: not-allowed; }
+
+/* Status message */
+.status {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #6e6e73;
+  min-height: 18px;
+}
+
+.status.ok { color: #30d158; }
+.status.err { color: #ff3b30; }
+
+/* Info section */
+.info-section {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.info-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-label {
+  font-size: 11px;
+  color: #6e6e73;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.endpoint {
+  font-size: 12px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  background: #f5f5f7;
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #1d1d1f;
+  word-break: break-all;
+}
+
+/* Breadcrumb */
+.breadcrumb {
+  font-size: 12px;
+  color: #6e6e73;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  min-height: 20px;
+}
+
+.breadcrumb .bc-seg {
+  cursor: pointer;
+  color: #0071e3;
+  padding: 1px 2px;
+  border-radius: 3px;
+}
+
+.breadcrumb .bc-seg:hover { text-decoration: underline; }
+
+.breadcrumb .bc-sep {
+  color: #aeaeb2;
+  user-select: none;
+}
+
+/* Directory tree */
+.tree {
+  font-size: 13px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tree-item:hover { background: #f0f0f5; }
+
+.tree-item .icon {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.tree-item .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-btn {
+  border: none;
+  background: #e8f0fe;
+  color: #0071e3;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: background 0.1s, color 0.1s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.add-btn:hover {
+  background: #0071e3;
+  color: #fff;
+}
+
+.tree-loading {
+  color: #aeaeb2;
+  font-size: 13px;
+  padding: 8px 6px;
+}
+
+@media (max-width: 600px) {
+  .container {
+    grid-template-columns: 1fr;
+  }
+}
