@@ -57,11 +57,74 @@ func saveConfig(cfg Config) error {
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 
+var fileGates = newFileGateManager()
+
 var (
 	allowedRoots []string
 	rootsMu      sync.RWMutex
 	logger       = log.New(io.Discard, "", 0)
+	maxWorkers   = 20
 )
+
+var workerSem = make(chan struct{}, maxWorkers)
+
+func acquireWorker() { workerSem <- struct{}{} }
+func releaseWorker() { <-workerSem }
+
+type fileGate struct {
+	mu            sync.Mutex
+	cond          *sync.Cond
+	pendingWrites int
+}
+
+type fileGateManager struct {
+	mu    sync.Mutex
+	gates map[string]*fileGate
+}
+
+func newFileGateManager() *fileGateManager {
+	return &fileGateManager{gates: make(map[string]*fileGate)}
+}
+
+func (m *fileGateManager) get(path string) *fileGate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if g, ok := m.gates[path]; ok {
+		return g
+	}
+	g := &fileGate{}
+	g.cond = sync.NewCond(&g.mu)
+	m.gates[path] = g
+	return g
+}
+
+func withQueuedWrite(path string, fn func() (string, error)) (string, error) {
+	gate := fileGates.get(path)
+	gate.mu.Lock()
+	gate.pendingWrites++
+	for gate.pendingWrites > 1 {
+		gate.cond.Wait()
+	}
+	gate.mu.Unlock()
+
+	result, err := fn()
+
+	gate.mu.Lock()
+	gate.pendingWrites--
+	gate.cond.Broadcast()
+	gate.mu.Unlock()
+	return result, err
+}
+
+func withConsistentRead(path string, fn func() (string, error)) (string, error) {
+	gate := fileGates.get(path)
+	gate.mu.Lock()
+	for gate.pendingWrites > 0 {
+		gate.cond.Wait()
+	}
+	gate.mu.Unlock()
+	return fn()
+}
 
 // SkipDirs are directory names ignored by list_directory and search_files.
 var skipDirs = map[string]bool{
@@ -234,16 +297,71 @@ func buildMCPServer() *server.MCPServer {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute or relative path to the file")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			acquireWorker()
+			defer releaseWorker()
 			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			data, err := os.ReadFile(abs)
+			result, err := withConsistentRead(abs, func() (string, error) {
+				data, err := os.ReadFile(abs)
+				if err != nil {
+					return "", fmt.Errorf("read error: %v", err)
+				}
+				logger.Printf("read_file: %s (%d bytes)", abs, len(data))
+				return string(data), nil
+			})
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("read error: %v", err)), nil
+				return mcp.NewToolResultError(err.Error()), nil
 			}
-			logger.Printf("read_file: %s (%d bytes)", abs, len(data))
-			return mcp.NewToolResultText(string(data)), nil
+			return mcp.NewToolResultText(result), nil
+		},
+	)
+
+	s.AddTool(
+		mcp.NewTool("read_files",
+			mcp.WithDescription("Read the complete contents of multiple files"),
+			mcp.WithArray("paths", mcp.Required(), mcp.Description("Array of absolute or relative file paths to read")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			acquireWorker()
+			defer releaseWorker()
+			rawPaths := req.GetArguments()["paths"]
+			paths, ok := rawPaths.([]any)
+			if !ok || len(paths) == 0 {
+				return mcp.NewToolResultError("paths must be a non-empty array"), nil
+			}
+
+			var sb strings.Builder
+			for i, raw := range paths {
+				path, ok := raw.(string)
+				if !ok || strings.TrimSpace(path) == "" {
+					return mcp.NewToolResultError("paths entries must be non-empty strings"), nil
+				}
+				abs, err := resolvePath(path)
+				if err != nil {
+					return mcp.NewToolResultError(err.Error()), nil
+				}
+				result, err := withConsistentRead(abs, func() (string, error) {
+					data, err := os.ReadFile(abs)
+					if err != nil {
+						return "", fmt.Errorf("read error for %s: %v", abs, err)
+					}
+					return string(data), nil
+				})
+				if err != nil {
+					return mcp.NewToolResultError(err.Error()), nil
+				}
+				if i > 0 {
+					sb.WriteString("\n\n")
+				}
+				sb.WriteString("==> ")
+				sb.WriteString(abs)
+				sb.WriteString(" <==\n")
+				sb.WriteString(result)
+			}
+			logger.Printf("read_files: %d files", len(paths))
+			return mcp.NewToolResultText(sb.String()), nil
 		},
 	)
 
@@ -254,19 +372,27 @@ func buildMCPServer() *server.MCPServer {
 			mcp.WithString("content", mcp.Required(), mcp.Description("Text content to write")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			acquireWorker()
+			defer releaseWorker()
 			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			content := req.GetString("content", "")
-			if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("mkdir error: %v", err)), nil
+			result, err := withQueuedWrite(abs, func() (string, error) {
+				if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+					return "", fmt.Errorf("mkdir error: %v", err)
+				}
+				if err := os.WriteFile(abs, []byte(content), 0644); err != nil {
+					return "", fmt.Errorf("write error: %v", err)
+				}
+				logger.Printf("write_file: %s (%d bytes)", abs, len(content))
+				return fmt.Sprintf("wrote %d bytes to %s", len(content), abs), nil
+			})
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
 			}
-			if err := os.WriteFile(abs, []byte(content), 0644); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("write error: %v", err)), nil
-			}
-			logger.Printf("write_file: %s (%d bytes)", abs, len(content))
-			return mcp.NewToolResultText(fmt.Sprintf("wrote %d bytes to %s", len(content), abs)), nil
+			return mcp.NewToolResultText(result), nil
 		},
 	)
 
@@ -278,25 +404,33 @@ func buildMCPServer() *server.MCPServer {
 			mcp.WithString("new_str", mcp.Required(), mcp.Description("Replacement string")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			acquireWorker()
+			defer releaseWorker()
 			abs, err := resolvePath(req.GetString("path", ""))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			data, err := os.ReadFile(abs)
+			result, err := withQueuedWrite(abs, func() (string, error) {
+				data, err := os.ReadFile(abs)
+				if err != nil {
+					return "", fmt.Errorf("read error: %v", err)
+				}
+				src := string(data)
+				oldStr := req.GetString("old_str", "")
+				if !strings.Contains(src, oldStr) {
+					return "", fmt.Errorf("old_str not found in file")
+				}
+				updated := strings.Replace(src, oldStr, req.GetString("new_str", ""), 1)
+				if err := os.WriteFile(abs, []byte(updated), 0644); err != nil {
+					return "", fmt.Errorf("write error: %v", err)
+				}
+				logger.Printf("patch_file: %s", abs)
+				return fmt.Sprintf("patched %s", abs), nil
+			})
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("read error: %v", err)), nil
+				return mcp.NewToolResultError(err.Error()), nil
 			}
-			src := string(data)
-			oldStr := req.GetString("old_str", "")
-			if !strings.Contains(src, oldStr) {
-				return mcp.NewToolResultError("old_str not found in file"), nil
-			}
-			updated := strings.Replace(src, oldStr, req.GetString("new_str", ""), 1)
-			if err := os.WriteFile(abs, []byte(updated), 0644); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("write error: %v", err)), nil
-			}
-			logger.Printf("patch_file: %s", abs)
-			return mcp.NewToolResultText(fmt.Sprintf("patched %s", abs)), nil
+			return mcp.NewToolResultText(result), nil
 		},
 	)
 
@@ -554,8 +688,11 @@ func handleSetRoots(w http.ResponseWriter, r *http.Request) {
 func main() {
 	logPath := flag.String("log", "", "path to log file (default: stderr)")
 	sseMode := flag.Bool("sse", false, "serve over HTTP/SSE instead of stdio")
-	port    := flag.Int("port", 0, "port for SSE mode (overrides config, default 8765)")
+	var port int
+	flag.IntVar(&port, "port", 8765, "port for SSE mode (overrides config, default 8765)")
+	flag.IntVar(&maxWorkers, "workers", maxWorkers, "maximum concurrent file operation workers (default 20)")
 	flag.Parse()
+	workerSem = make(chan struct{}, maxWorkers)
 
 	// Logger
 	var logOut io.Writer = os.Stderr
@@ -572,8 +709,8 @@ func main() {
 
 	// Load config
 	cfg := loadConfig()
-	if *port != 0 {
-		cfg.Port = *port
+	if port != 8765 {
+		cfg.Port = port
 	}
 
 	// Roots: CLI args override config
@@ -610,7 +747,10 @@ func main() {
 	// MCP SSE endpoint
 	sseSrv := server.NewSSEServer(mcpSrv, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Port)))
 	mux.Handle("/sse", sseSrv)
-	mux.Handle("/message", sseSrv)
+	// /message handles MCP JSON-RPC: tools/list, tools/call, etc.
+	mux.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	})
 
 	// API
 	mux.HandleFunc("/api/browse", handleBrowse)
@@ -644,7 +784,7 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	addr := fmt.Sprintf(":%d", port)
 	logger.Printf("mcp-fs SSE listening on http://localhost%s", addr)
 	logger.Printf("  GUI:          http://localhost%s/", addr)
 	logger.Printf("  SSE endpoint: http://localhost%s/sse", addr)

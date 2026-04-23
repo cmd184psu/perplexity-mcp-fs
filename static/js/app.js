@@ -30,36 +30,35 @@ async function probeTools() {
   probeToolsOutput.textContent = 'Probing…';
 
   const base = window.location.origin;
-  const sseUrlLocal = base + '/sse';
   const msgUrl = base + '/message';
 
   const id = 'probe-' + Date.now();
+  let resolved = false;
 
-  const es = new EventSource(sseUrlLocal);
+  const es = new EventSource(base + '/sse');
   es.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.id === id && msg.result && msg.result.tools) {
+        resolved = true;
         const names = msg.result.tools.map(t => t.name).sort();
-        probeToolsOutput.textContent = 'Tools (via SSE):\n' + names.join('\n');
+        probeToolsOutput.textContent = 'Tools (' + names.length + ' via SSE/MCP):\n' + names.join('\n');
         es.close();
       }
-    } catch (e) {
-      // ignore non-JSON events
-    }
+    } catch (e) { /* ignore non-JSON events */ }
   };
-  es.onerror = (err) => {
-    probeToolsOutput.textContent = 'SSE error while probing tools';
+  es.onerror = () => {
+    if (!resolved) probeToolsOutput.textContent = 'SSE error while probing tools';
     es.close();
   };
 
   try {
-    const payload = [{
+    const payload = {
       jsonrpc: '2.0',
       id,
-      method: 'list_tools',
+      method: 'tools/list',
       params: {}
-    }];
+    };
     const res = await fetch(msgUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
