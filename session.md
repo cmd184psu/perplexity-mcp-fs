@@ -122,3 +122,76 @@ Worker pool fully implemented and configurable via -workers N. All file tools wi
 2. Optimize worker pool for I/O-bound tasks.
 3. Add UI MCP SSE full client for live tool enumeration.
 4. Clean up artifacts when confident.
+
+
+### 2026-04-23 22:39 EDT
+
+**Summary**
+Addressed blockers in main.go before adding /api/tools endpoint.
+
+
+### 2026-04-23 22:41 EDT
+
+**Summary**
+Addressed blockers in main.go before adding /api/tools endpoint.
+
+
+### 2026-04-23 22:43 EDT
+
+**Summary**
+Addressed blockers in main.go before adding /api/tools endpoint.
+
+
+### 2026-04-23 22:45 EDT
+
+**Summary**
+Addressed blockers in main.go before adding /api/tools endpoint.
+
+
+### 2026-04-23 22:47 EDT
+
+**Summary**
+Addressed blockers in main.go before adding /api/tools endpoint.
+
+
+### 2026-04-24 16:59 EDT
+
+**Summary**
+Diagnosed the build failure as use of mcpSrv.Tools on *server.MCPServer, which has no exported Tools field or method in the current mcp-go version. Began fixing the source by adding a reflection-based helper in main.go to inspect the unexported tools field and importing reflect.
+
+**Next steps**
+Update the remaining mcpSrv.Tools references in main.go and main_test.go to use the reflection helper, then run make test to confirm the build is fixed.
+
+
+### 2026-04-24 17:02 EDT
+
+**Summary**
+Fixed a malformed replacement from the prior patch: the original code path was effectively len(mcpSrv.Tools()), but the earlier string replacement produced mustToolNamesFromServer(mcpSrv)(), which caused a compile error because a []string value is not callable. Updated both main.go and main_test.go to use len(mustToolNamesFromServer(mcpSrv)).
+
+**Next steps**
+Run make test again. If reflection access panics or returns the wrong length, inspect the mcp-go server internals and refine mustToolNamesFromServer accordingly.
+
+
+### 2026-04-24 17:15 EDT
+
+**Summary**
+Tabled the remaining s.AddTool→add() conversion work due to persistent MCP patch_file timeouts on the large main.go file. Partial progress: read_file, read_files, write_file, patch_file, list_directory converted to add(). Still needed: search_files, create_directory, delete_file, get_file_info, make_build, make_test, update_session_md conversions; /api/tools handler fix (encode registeredTools instead of calling ListTools); remove reflect import; fix main_test.go len(mustToolNamesFromServer) → len(registeredTools). Root cause of timeouts: main.go is too large for patch_file to handle reliably.
+
+**Next steps**
+Break main.go into smaller files to eliminate patch timeouts. Suggested split: (1) main.go - flags, main(), HTTP server setup, config load/save; (2) tools.go - buildMCPServer, registeredTools, all AddTool/add() calls; (3) handlers.go - /api/* HTTP handlers including /api/tools; (4) fs.go - resolvePath, setRoots, resolveProjectRoot, runMakeTarget, appendSessionNote, file gate types. After split, complete the add() conversion and fix /api/tools handler.
+
+
+### 2026-04-24 22:37 EDT
+
+**Summary**
+Major stability + test quality overhaul:
+1. buildmcpserver.go: all 12 inline lambda handlers extracted to named top-level functions (handleReadFile, handleReadFiles, handleWriteFile, handlePatchFile, handleListDirectory, handleSearchFiles, handleCreateDirectory, handleDeleteFile, handleGetFileInfo, handleMakeBuild, handleMakeTest, handleUpdateSessionMd). buildMCPServer() is now a clean registration table only.
+2. concurrency.go: added ref-counting (refs field) to fileGate so the fileGateManager.put() method can evict gates when no goroutines hold them — fixes unbounded map growth. No logic changes to write serialization or read-wait semantics.
+3. main.go: fixed /api/tools handler to use registeredTools directly instead of the non-existent mcpSrv.ListTools().
+4. main_test.go: completely replaced all source-grep tests with behavioral tests that call handler functions directly against real temp dirs. 42 tests, all pass with -race. New tests cover: read_file (contents, outside-root rejection, missing file), read_files (aggregation, empty/non-array rejection), write_file (creates file, creates parent dirs, outside-root rejection), patch_file (first-occurrence replace, old_str-not-found error), list_directory (entries, skipDirs), search_files (glob match, skipDirs), create_directory, delete_file (file removal, directory rejection), get_file_info (metadata), API endpoint, concurrency correctness, gate eviction, round-trip read/write/patch.
+
+**Next steps**
+- Rebuild and restart the live binary (make build && launchctl kickstart / restart the plist) so the stability fixes take effect for the running connector.
+- Monitor for timeout/partial-read recurrence; the gate eviction fix eliminates the memory leak that could have caused GC pressure on long-running sessions.
+- Consider adding a context.Context timeout to acquireWorker() for defense against full-pool stalls (low priority on M4 with 20 workers).
+- Clean up junk/ directory and old backup binaries when confident.
